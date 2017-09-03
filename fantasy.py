@@ -11,6 +11,7 @@
 import numpy as np
 from scipy.integrate import cumtrapz
 from scipy.stats import norm
+from scipy.stats import poisson
 from jsonDB import *
 import sys
 import csv
@@ -56,6 +57,12 @@ def get_mean(league,ovrd):
     else:
         return {team['Name']: {stat: np.mean(jql.select('league',league,'teams',ndx,'Season',where=(stat,"",stat)),axis=0) for stat in team['Season'][0].keys()} for ndx,team in enumerate(jql.select('league',league,'teams'))}
 
+def get_max(league,ovrd):
+    if ovrd:
+        return {team['Name']: {stat: np.max(jql.select('league',league,'teams',ndx,'Season',where=(stat,"",stat))[:ovrd],axis=0) for stat in team['Season'][0].keys()} for ndx,team in enumerate(jql.select('league',league,'teams'))}
+    else:
+        return {team['Name']: {stat: np.max(jql.select('league',league,'teams',ndx,'Season',where=(stat,"",stat)),axis=0) for stat in team['Season'][0].keys()} for ndx,team in enumerate(jql.select('league',league,'teams'))}
+
 def get_std(league,ovrd):
     if ovrd:
         return {team['Name']: {stat: np.std(jql.select('league',league,'teams',ndx,'Season',where=(stat,"",stat))[:ovrd],axis=0) for stat in team['Season'][0].keys()} for ndx,team in enumerate(jql.select('league',league,'teams'))}
@@ -98,14 +105,33 @@ def odds_report(league,season=False):
         write_table(league+'_Odds.csv',[{bar: {team['Name']: team['Odds'][-1][bar] for team in jql.select('league',league,'teams')}} for bar in jql.select('game type',jql.select('league','Baseball_17','schema'),0,'values','values',3,'values','values',where=('name','"*"','name'))])
 
 # ***** Matchups Logic ***** #
+def discrete_subtraction(home,away):
+    win = sum([prob*sum(away[:ndx]) for ndx,prob in enumerate(home)])
+    tie = sum([prob*away[ndx] for ndx,prob in enumerate(home)])
+    return win + tie*0.5
+
+def normal_odds(mu_h,mu_a,sig_h,sig_a):
+    return 1-norm.cdf(0,mu_h-mu_a,np.sqrt((sig_h**2)+(sig_a**2)))
+
+def poisson_odds(mu_h,mu_a,max_h,max_a):
+    vals = range(2*max(max_h,max_a))
+    return discrete_subtraction(poisson.pmf(vals,mu_h),poisson.pmf(vals,mu_a))
+
+def pick_fit(means,stdevs,maxes,home,away,stat):
+    if stat in ['R','HR','RBI','SB','W','SV','K']:
+        return poisson_odds(means[home][stat],means[away][stat],maxes[home][stat],maxes[away][stat])
+    else:
+        return normal_odds(means[home][stat],means[away][stat],stdevs[home][stat],stdevs[away][stat])
+
 def new_odds(league,ovrd=False):
     '''
     '''
     means = get_mean(league,ovrd)
     stdevs = get_std(league,ovrd)
+    maxes = get_max(league,ovrd)
     scored = {entry['name']: entry['scored'] for entry in jql.select('game type',jql.select('league',league,'schema'),0,'values','values',1,'values','values',where=('name','"*"','*'))}
-    teams = means.keys()
-    probs = {team: {opp: [np.absolute((0 if scored[stat] == -1 else 1)-norm.cdf(0,means[team][stat]-means[opp][stat],np.sqrt(stdevs[team][stat]**2+stdevs[opp][stat]**2))) for stat in means[team].keys() if scored[stat] != 0] for opp in teams if opp != team} for team in teams}
+    teams = jql.select('league',league,'teams',where=('Name','"*"','Name'))
+    probs = {team: {opp: [np.absolute((0 if scored[stat] == 1 else 1)-pick_fit(means,stdevs,maxes,team,opp,stat)) for stat in scored.keys() if scored[stat] != 0] for opp in teams if opp != team} for team in teams}
     probs = {team: {opp: np.sum(np.array([[probs[team][opp][ndx],probs[team][opp][ndx]*probs[opp][team][ndx]] for ndx in range(10)]),axis=0) for opp in teams if opp != team} for team in teams}
     for team in probs.keys():
         probs[team][''] = np.zeros(2)
